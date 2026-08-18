@@ -1,8 +1,9 @@
-module github.com/code19m/sentinel
+module github.com/qadam-uz/sentinel
 
 go 1.23.1
 
 require (
+	github.com/go-telegram-bot-api/telegram-bot-api v4.6.4+incompatible
 	github.com/google/uuid v1.6.0
 	github.com/grpc-ecosystem/go-grpc-middleware/v2 v2.1.0
 	github.com/ilyakaznacheev/cleanenv v1.5.0
@@ -16,7 +17,6 @@ require (
 	github.com/BurntSushi/toml v1.2.1 // indirect
 	github.com/bwmarrin/discordgo v0.28.1 // indirect
 	github.com/davecgh/go-spew v1.1.1 // indirect
-	github.com/go-telegram-bot-api/telegram-bot-api v4.6.4+incompatible // indirect
 	github.com/gorilla/websocket v1.5.3 // indirect
 	github.com/jackc/pgpassfile v1.0.0 // indirect
 	github.com/jackc/pgservicefile v0.0.0-20240606120523-5a60cdf6a761 // indirect

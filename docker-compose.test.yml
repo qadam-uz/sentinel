@@ -1,0 +1,23 @@
+# Postgres for the store tests (repository/store/postgres_test.go).
+#
+#   docker compose -f docker-compose.test.yml up -d
+#   SENTINEL_TEST_DSN='postgres://postgres:postgres@localhost:5433/sentinel_test?sslmode=disable' \
+#     go test -race ./...
+#
+# Its own port and its own throwaway volume, so it can never be mistaken for
+# a development database — the tests create and drop schemas.
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: sentinel_test
+    ports:
+      - "5433:5432"
+    tmpfs:
+      - /var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d sentinel_test"]
+      interval: 1s
+      timeout: 3s
+      retries: 30

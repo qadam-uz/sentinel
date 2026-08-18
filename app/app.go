@@ -1,3 +1,11 @@
+// Package app is sentinel's standalone gRPC service: one deployment that many
+// applications report to over the network.
+//
+// It is a thin shell over the embedded reporter in the root package — both
+// share the same storage, cooldown and alerting — so an application can start
+// with sentinel embedded (no service to deploy) and move to a central service
+// later without changing what it reports. See the root package docs for the
+// embedded mode.
 package app
 
 import (
@@ -7,29 +15,40 @@ import (
 	"log/slog"
 	"net"
 	"runtime"
+	"time"
 
-	"github.com/code19m/sentinel/config"
-	"github.com/code19m/sentinel/pb"
-	"github.com/code19m/sentinel/repository/notifier"
-	"github.com/code19m/sentinel/repository/store"
-	"github.com/code19m/sentinel/server"
-	"github.com/code19m/sentinel/usecase"
 	"github.com/grpc-ecosystem/go-grpc-middleware/v2/interceptors/recovery"
-	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/qadam-uz/sentinel"
+	"github.com/qadam-uz/sentinel/config"
+	"github.com/qadam-uz/sentinel/pb"
+	"github.com/qadam-uz/sentinel/server"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/reflection"
 	"google.golang.org/grpc/status"
 )
 
-// Server is the main sentinel application server.
-// It can be used standalone or embedded into another application.
+const (
+	// startupTimeout bounds the service's first contact with Postgres —
+	// connect, plus creating or upgrading the schema. Unbounded, a database
+	// that accepts the connection but never answers would leave the service
+	// hanging in a state no orchestrator can tell from a slow start.
+	startupTimeout = 30 * time.Second
+
+	// stopTimeout bounds the shutdown of the reporter behind the gRPC service.
+	stopTimeout = 10 * time.Second
+)
+
+// Server is the standalone sentinel gRPC service.
+//
+// To run sentinel inside your own application instead, use sentinel.New from
+// the root package — it needs no listener and no port.
 type Server struct {
 	logger *slog.Logger
 	cfg    config.Config
 
-	pgConn *pgxpool.Pool
-	grpc   *grpc.Server
+	reporter *sentinel.Reporter
+	grpc     *grpc.Server
 }
 
 // NewServer creates a new Server instance. It connects to the database,
@@ -38,29 +57,36 @@ func NewServer(
 	logger *slog.Logger,
 	cfg config.Config,
 ) (*Server, error) {
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), startupTimeout)
+	defer cancel()
 
-	pgConn, err := pgxpool.New(ctx, fmt.Sprintf("host=%s port=%s user=%s password=%s dbname=%s sslmode=disable",
-		cfg.PostgresHost, cfg.PostgresPort, cfg.PostgresUser, cfg.PostgresPassword, cfg.PostgresDatabase))
+	alerting, err := alertingFrom(cfg)
 	if err != nil {
-		return nil, fmt.Errorf("sentinel: connect to database: %w", err)
+		return nil, err
 	}
 
-	pgStore, err := store.NewPgStore(pgConn, cfg.PostgresSchema)
+	reporter, err := sentinel.New(ctx, sentinel.Config{
+		// Service is not set: each report carries the name of the
+		// application that sent it.
+		Env:             cfg.Environment,
+		DSN:             cfg.DSN(),
+		Schema:          cfg.PostgresSchema,
+		Alert:           alerting,
+		Logger:          logger,
+		CooldownMinutes: cfg.AlertCooldownMinutes,
+		RetentionDays:   cfg.AlertRetentionDays,
+		// A service serves many clients at once, unlike an embedded reporter
+		// with its single delivery goroutine; match pgxpool's own default.
+		MaxConns: int32(max(4, runtime.NumCPU())), //nolint:gosec // NumCPU is small
+		// Store what clients send; the notifiers cap what a chat message can
+		// carry on their own.
+		MaxDetailLen: -1,
+	})
 	if err != nil {
-		pgConn.Close()
-		return nil, fmt.Errorf("sentinel: create store: %w", err)
+		return nil, err
 	}
 
-	notifier, err := defineNotifier(cfg)
-	if err != nil {
-		pgConn.Close()
-		return nil, fmt.Errorf("sentinel: create notifier: %w", err)
-	}
-
-	uc := usecase.New(logger, pgStore, notifier, cfg.AlertCooldownMinutes)
-
-	sentinelServer := server.NewSentinelServer(cfg, logger, uc)
+	sentinelServer := server.NewSentinelServer(logger, reporter)
 
 	grpcPanicRecoveryHandler := func(p any) (err error) {
 		buf := new(bytes.Buffer)
@@ -83,10 +109,10 @@ func NewServer(
 	reflection.Register(grpcServer)
 
 	return &Server{
-		logger: logger,
-		cfg:    cfg,
-		pgConn: pgConn,
-		grpc:   grpcServer,
+		logger:   logger,
+		cfg:      cfg,
+		reporter: reporter,
+		grpc:     grpcServer,
 	}, nil
 }
 
@@ -109,24 +135,32 @@ func (s *Server) Start() error {
 // Stop gracefully stops the server and closes the database connection.
 func (s *Server) Stop() {
 	s.grpc.GracefulStop()
-	s.pgConn.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), stopTimeout)
+	defer cancel()
+	if err := s.reporter.Close(ctx); err != nil {
+		s.logger.Error("Shutdown incomplete", slog.Any("error", err))
+	}
+
 	s.logger.Info("Server stopped")
 }
 
-func defineNotifier(cfg config.Config) (notifier.Notifier, error) {
+// alertingFrom maps the environment-driven config onto the alert destination.
+// config.LoadConfig already rejects an unknown provider; this guards the
+// callers that build a config.Config by hand.
+func alertingFrom(cfg config.Config) (sentinel.Alerting, error) {
 	if cfg.AlertDisable {
-		return notifier.NewNoopNotifier(), nil
+		return sentinel.NoAlerts(), nil
 	}
 
 	switch cfg.AlertProvider {
-
 	case config.AlertProviderTelegram:
-		return notifier.NewTelegramNotifier(cfg.TelegramBotToken, cfg.TelegramsChatIDs, cfg.Environment)
+		return sentinel.Telegram(cfg.TelegramBotToken, cfg.TelegramsChatIDs...), nil
 
 	case config.AlertProviderDiscord:
-		return notifier.NewDiscordNotifier(cfg.DiscordBotToken, cfg.DiscordChannelIDs, cfg.Environment)
+		return sentinel.Discord(cfg.DiscordBotToken, cfg.DiscordChannelIDs...), nil
 
 	default:
-		return nil, fmt.Errorf("defineNotifier: invalid alert provider: %s", cfg.AlertProvider)
+		return sentinel.Alerting{}, fmt.Errorf("sentinel: invalid alert provider: %q", cfg.AlertProvider)
 	}
 }

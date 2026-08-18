@@ -7,8 +7,8 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/code19m/sentinel/app"
-	"github.com/code19m/sentinel/config"
+	"github.com/qadam-uz/sentinel/app"
+	"github.com/qadam-uz/sentinel/config"
 )
 
 func main() {

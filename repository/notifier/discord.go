@@ -5,9 +5,9 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/code19m/sentinel/entity"
 	"github.com/nikoksr/notify"
 	"github.com/nikoksr/notify/service/discord"
+	"github.com/qadam-uz/sentinel/entity"
 )
 
 type discordNotifier struct {
@@ -60,18 +60,20 @@ func (dn *discordNotifier) buildMsgBody(e entity.ErrorInfo) string {
 	buffer.WriteString(fmt.Sprintf("**🛠️ Service:** %s\n", escapeMarkdown(e.Service)))
 	buffer.WriteString(fmt.Sprintf("**🔄 Operation:** %s\n", escapeMarkdown(e.Operation)))
 	buffer.WriteString(fmt.Sprintf("**🏷️ Code:** %s\n", escapeMarkdown(e.Code)))
-	buffer.WriteString(fmt.Sprintf("**💬 Message:** %s\n", escapeMarkdown(e.Message)))
+	// Capped like the details: the standalone service stores whatever a
+	// client sends, so the message is the one field that arrives unbounded.
+	buffer.WriteString(fmt.Sprintf("**💬 Message:** %s\n", markdownField(e.Message)))
 
 	// Separator for Details section
 	buffer.WriteString("\n**📋 _Additional details_**\n")
 
-	// Details section with only visible details
+	// Details section with only visible details. The value keeps its code
+	// block — it is usually a payload or a stack — so it is not Markdown
+	// escaped, only kept from closing the block early.
 	for k, v := range e.Details {
 		if v != "" {
-			if len(v) > 1000 {
-				v = v[:1000] + "..."
-			}
-			buffer.WriteString(fmt.Sprintf("_%s_: ```%s```", escapeMarkdown(k), v))
+			buffer.WriteString(fmt.Sprintf("_%s_: ```%s```\n",
+				escapeMarkdown(k), codeField(v)))
 		}
 	}
 

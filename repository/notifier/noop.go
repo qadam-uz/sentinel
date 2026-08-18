@@ -3,7 +3,7 @@ package notifier
 import (
 	"context"
 
-	"github.com/code19m/sentinel/entity"
+	"github.com/qadam-uz/sentinel/entity"
 )
 
 type noopNotifier struct {
